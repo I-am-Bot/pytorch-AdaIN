@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 from function import adaptive_instance_normalization as adain
@@ -41,6 +42,7 @@ vgg = nn.Sequential(
     nn.Conv2d(3, 64, (3, 3)),
     nn.ReLU(),  # relu1-1
     nn.ReflectionPad2d((1, 1, 1, 1)),
+
     nn.Conv2d(64, 64, (3, 3)),
     nn.ReLU(),  # relu1-2
     nn.MaxPool2d((2, 2), (2, 2), (0, 0), ceil_mode=True),
@@ -48,6 +50,7 @@ vgg = nn.Sequential(
     nn.Conv2d(64, 128, (3, 3)),
     nn.ReLU(),  # relu2-1
     nn.ReflectionPad2d((1, 1, 1, 1)),
+
     nn.Conv2d(128, 128, (3, 3)),
     nn.ReLU(),  # relu2-2
     nn.MaxPool2d((2, 2), (2, 2), (0, 0), ceil_mode=True),
@@ -55,6 +58,7 @@ vgg = nn.Sequential(
     nn.Conv2d(128, 256, (3, 3)),
     nn.ReLU(),  # relu3-1
     nn.ReflectionPad2d((1, 1, 1, 1)),
+
     nn.Conv2d(256, 256, (3, 3)),
     nn.ReLU(),  # relu3-2
     nn.ReflectionPad2d((1, 1, 1, 1)),
@@ -67,6 +71,7 @@ vgg = nn.Sequential(
     nn.ReflectionPad2d((1, 1, 1, 1)),
     nn.Conv2d(256, 512, (3, 3)),
     nn.ReLU(),  # relu4-1, this is the last layer used
+    
     nn.ReflectionPad2d((1, 1, 1, 1)),
     nn.Conv2d(512, 512, (3, 3)),
     nn.ReLU(),  # relu4-2
@@ -150,3 +155,99 @@ class Net(nn.Module):
         for i in range(1, 4):
             loss_s += self.calc_style_loss(g_t_feats[i], style_feats[i])
         return loss_c, loss_s
+
+    """
+    1/24/2023 added: non-targeted attack
+    """
+    def calc_adv_loss(self, input_mean, input_std, target_mean, target_std):
+        return self.mse_loss(input_mean, target_mean) + \
+               self.mse_loss(input_std, target_std)
+
+    def adv_forward(self, content, style):
+        x_adv = style.detach() + 0.001 * torch.randn(style.shape).cuda().detach()
+        # import ipdb
+        # ipdb.set_trace()
+        epsilon = 16.0 / 255.0
+        alpha = 1.6 / 255.0
+        # non-target
+        style_feats = self.encode_with_intermediate(1 - style)
+
+        for _step in range(50):
+            print(_step)
+            x_adv.requires_grad_()
+            with torch.enable_grad():
+                adv_feats = self.encode_with_intermediate(x_adv)
+                # import ipdb
+                # ipdb.set_trace()
+                
+                # adv_mean, adv_std = calc_mean_std(adv_feats[1])
+                # target_mean, target_std = calc_mean_std(style_feats[1])
+                loss_adv = 0
+
+                for i in range(0, 4):
+                    adv_mean, adv_std = calc_mean_std(adv_feats[i])
+                    target_mean, target_std = calc_mean_std(style_feats[i])
+
+                    loss_adv += self.calc_adv_loss(target_mean.detach(), target_std.detach(), adv_mean, adv_std)
+                
+            grad = torch.autograd.grad(loss_adv, [x_adv])[0]
+            x_adv = x_adv.detach() - alpha * torch.sign(grad.detach())
+            # x_adv = x_adv.detach() - alpha * torch.sign(grad.detach())
+
+            x_adv = torch.min(torch.max(x_adv, style - epsilon), style + epsilon)
+            x_adv = torch.clamp(x_adv, 0, 1.0)
+
+            print(loss_adv.item())
+
+        import torchvision
+        torch.save(x_adv, "/egr/research-dselab/liyaxin1/unlearnable/pytorch-AdaIN/results/demo/attack1.pt")
+        torchvision.utils.save_image(x_adv[0], "/egr/research-dselab/liyaxin1/unlearnable/pytorch-AdaIN/results/demo/attack1.png")
+        torchvision.utils.save_image(style[0], "/egr/research-dselab/liyaxin1/unlearnable/pytorch-AdaIN/results/demo/attack1_org.png")
+        
+        # return  style_mean, style_std
+        input("attack done")
+        return x_adv
+
+    def adv_target_forward(self, content, style, adv):
+        x_adv = style.detach() + 0.001 * torch.randn(style.shape).cuda().detach()
+        # import ipdb
+        # ipdb.set_trace()
+        epsilon = 8 / 255.0
+        alpha = 0.8 / 255.0
+        # non-target
+        target_feats = self.encode_with_intermediate(adv)
+
+        for _step in range(50):
+            print(_step)
+            x_adv.requires_grad_()
+            with torch.enable_grad():
+                adv_feats = self.encode_with_intermediate(x_adv)
+                # import ipdb
+                # ipdb.set_trace()
+                
+                # adv_mean, adv_std = calc_mean_std(adv_feats[1])
+                # target_mean, target_std = calc_mean_std(style_feats[1])
+                loss_adv = 0
+
+                for i in range(0, 4):
+                    adv_mean, adv_std = calc_mean_std(adv_feats[i])
+                    target_mean, target_std = calc_mean_std(target_feats[i])
+
+                    loss_adv += self.calc_adv_loss(target_mean.detach(), target_std.detach(), adv_mean, adv_std)
+                
+            grad = torch.autograd.grad(loss_adv, [x_adv])[0]
+            x_adv = x_adv.detach() - alpha * torch.sign(grad.detach())
+
+            x_adv = torch.min(torch.max(x_adv, style - epsilon), style + epsilon)
+            x_adv = torch.clamp(x_adv, 0, 1.0)
+
+            print(loss_adv.item())
+
+        import torchvision
+        torch.save(x_adv, "/egr/research-dselab/liyaxin1/unlearnable/pytorch-AdaIN/results/demo/attack1_tgt.pt")
+        torchvision.utils.save_image(x_adv[0], "/egr/research-dselab/liyaxin1/unlearnable/pytorch-AdaIN/results/demo/attack1_tgt.png")
+        torchvision.utils.save_image(style[0], "/egr/research-dselab/liyaxin1/unlearnable/pytorch-AdaIN/results/demo/attack1_org.png")
+        
+        # return  style_mean, style_std
+        input("attack done")
+        return x_adv

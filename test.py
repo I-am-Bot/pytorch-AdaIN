@@ -21,12 +21,22 @@ def test_transform(size, crop):
     transform = transforms.Compose(transform_list)
     return transform
 
+def calc_mean_std(feat, eps=1e-5):
+    # eps is a small value added to the variance to avoid divide-by-zero.
+    size = feat.size()
+    assert (len(size) == 4)
+    N, C = size[:2]
+    feat_var = feat.view(N, C, -1).var(dim=2) + eps
+    feat_std = feat_var.sqrt().view(N, C, 1, 1)
+    feat_mean = feat.view(N, C, -1).mean(dim=2).view(N, C, 1, 1)
+    return feat_mean, feat_std
 
 def style_transfer(vgg, decoder, content, style, alpha=1.0,
                    interpolation_weights=None):
     assert (0.0 <= alpha <= 1.0)
     content_f = vgg(content)
     style_f = vgg(style)
+
     if interpolation_weights:
         _, C, H, W = content_f.size()
         feat = torch.FloatTensor(1, C, H, W).zero_().to(device)
@@ -50,6 +60,12 @@ parser.add_argument('--style', type=str,
                     help='File path to the style image, or multiple style \
                     images separated by commas if you want to do style \
                     interpolation or spatial control')
+                    
+parser.add_argument('--adv', type=str,
+                    help='File path to the adv image, or multiple adv \
+                    images separated by commas if you want to do adv \
+                    interpolation or spatial control')
+
 parser.add_argument('--style_dir', type=str,
                     help='Directory path to a batch of style images')
 parser.add_argument('--vgg', type=str, default='models/vgg_normalised.pth')
@@ -128,6 +144,12 @@ decoder.to(device)
 content_tf = test_transform(args.content_size, args.crop)
 style_tf = test_transform(args.style_size, args.crop)
 
+
+"""
+1/24/2023: 
+"""
+network = net.Net(vgg, decoder)
+
 for content_path in content_paths:
     if do_interpolation:  # one content image, N style image
         style = torch.stack([style_tf(Image.open(str(p))) for p in style_paths])
@@ -147,15 +169,60 @@ for content_path in content_paths:
         for style_path in style_paths:
             content = content_tf(Image.open(str(content_path)))
             style = style_tf(Image.open(str(style_path)))
+            
             if args.preserve_color:
                 style = coral(style, content)
             style = style.to(device).unsqueeze(0)
             content = content.to(device).unsqueeze(0)
+
+            if args.adv is not None:
+                adv = style_tf(Image.open(str(args.adv)))
+                adv = adv.to(device).unsqueeze(0)
+            """
+            1/24/2023 added: attack
+            """
+            
+            # adv = network.adv_forward(content, style)
+            # with torch.no_grad():
+            #     output = style_transfer(vgg, decoder, content, adv, args.alpha)
+            # output_name = output_dir / '{:s}_adv_stylized_{:s}{:s}'.format(
+            #     content_path.stem, style_path.stem, args.save_ext)
+
+
+            # before attack
             with torch.no_grad():
-                output = style_transfer(vgg, decoder, content, style,
-                                        args.alpha)
-            output = output.cpu()
+                output = style_transfer(vgg, decoder, content, style, args.alpha)
 
             output_name = output_dir / '{:s}_stylized_{:s}{:s}'.format(
                 content_path.stem, style_path.stem, args.save_ext)
+            
+            # target
+            with torch.no_grad():
+                output_target = style_transfer(vgg, decoder, content, adv, args.alpha)
+
+            output_target_name = output_dir / '{:s}_stylized_{:s}{:s}'.format(
+                content_path.stem, Path(args.adv).stem, args.save_ext)      
+
+            #after attack
+            adv = network.adv_target_forward(content, style, adv)
+
+            with torch.no_grad():
+                output_adv = style_transfer(vgg, decoder, content, adv, args.alpha)
+
+            output_adv_name = output_dir / '{:s}_tgt_stylized_{:s}{:s}'.format(
+                content_path.stem, style_path.stem, args.save_ext)
+
+            import ipdb
+            ipdb.set_trace()
+            ori_mean, ori_std = calc_mean_std(vgg(output))
+            target_mean, target_std = calc_mean_std(vgg(output_target))
+            adv_mean, adv_std = calc_mean_std(vgg(output_adv)) 
+            # print(mean(adv_mean - ori_mean), mean(adv_mean - target_mean))
+
+            output = output.cpu()
+            output_target = output_target.cpu()
+            output_adv = output_adv.cpu()
+
             save_image(output, str(output_name))
+            save_image(output_target, str(output_target_name))
+            save_image(output_adv, str(output_adv_name))
